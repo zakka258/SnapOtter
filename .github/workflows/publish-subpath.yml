@@ -93,7 +93,9 @@ jobs:
           assert.equal(new URL(manifest.start_url, `${origin}/snapotter/manifest.json`).pathname, '/snapotter/');
           const auth = await (await fetch(`${origin}/snapotter/api/v1/config/auth`)).json();
           assert.equal(auth.authEnabled, true);
-          assert.equal((await fetch(`${origin}/snapotter/api/not-found`)).status, 404);
+          const protectedApi = await fetch(`${origin}/snapotter/api/not-found`);
+          assert.equal(protectedApi.status, 401);
+          assert.match(protectedApi.headers.get('content-type') ?? '', /application\/json/);
           console.log('Production container health, auth configuration, assets, manifest, and deep links passed');
           JS
       - name: Push verified platform image
