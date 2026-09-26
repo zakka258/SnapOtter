@@ -15,7 +15,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/zakka258/snapotter
-  SOURCE_COMMIT: 7dc321c65103d8ac62ff75e7e1b9d7081a70047f
+  SOURCE_COMMIT: 83dd4562e8417d1cb4daf412e0c51e0549ab3bfe
 
 jobs:
   build:
