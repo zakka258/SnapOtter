@@ -14,6 +14,8 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import sharp, { type OverlayOptions } from "sharp";
 import { z } from "zod";
+import { db, schema } from "../../db/index.js";
+import { INVALID_CLIENT_JOB_ID_ERROR, parseClientJobIdField } from "../../jobs/types.js";
 import { autoOrient } from "../../lib/auto-orient.js";
 import { formatZodErrors } from "../../lib/errors.js";
 import { getFirstMissingBundleForTool } from "../../lib/feature-status.js";
@@ -27,6 +29,8 @@ import {
 import { decodeHeic } from "../../lib/heic-converter.js";
 import { multipartFailure } from "../../lib/multipart-parts.js";
 import { getObjectBuffer, putObject } from "../../lib/object-storage.js";
+import { isUniqueViolation } from "../../lib/pg-errors.js";
+import { getAuthUser } from "../../plugins/auth.js";
 import { updateSingleFileProgress } from "../progress.js";
 import { registerToolProcessFn } from "../tool-factory.js";
 
@@ -161,6 +165,7 @@ export function registerPassportPhoto(app: FastifyInstance) {
       let fileBuffer: Buffer | null = null;
       let filename = "image";
       let clientJobId: string | null = null;
+      let clientJobIdRaw: string | null = null;
 
       try {
         const parts = request.parts();
@@ -171,16 +176,19 @@ export function registerPassportPhoto(app: FastifyInstance) {
             fileBuffer = Buffer.concat(chunks);
             filename = sanitizeFilename(part.filename ?? "image");
           } else if (part.fieldname === "clientJobId") {
-            const raw = part.value as string;
-            if (typeof raw === "string" && raw.length > 0 && raw.length <= 128) {
-              clientJobId = raw;
-            }
+            clientJobIdRaw = part.value as string;
           }
         }
       } catch (err) {
         const failure = multipartFailure(err);
         return reply.status(failure.status).send(failure.body);
       }
+
+      const clientJobIdField = parseClientJobIdField(clientJobIdRaw);
+      if (clientJobIdField === null) {
+        return reply.status(400).send({ error: INVALID_CLIENT_JOB_ID_ERROR });
+      }
+      clientJobId = clientJobIdField ?? null;
 
       if (!fileBuffer || fileBuffer.length === 0) {
         return reply.status(400).send({ error: "No image file provided" });
@@ -189,6 +197,26 @@ export function registerPassportPhoto(app: FastifyInstance) {
       const validation = await validateImageBuffer(fileBuffer, filename);
       if (!validation.valid) {
         return reply.status(400).send({ error: `Invalid image: ${validation.reason}` });
+      }
+
+      // Progress goes out under the caller's clientJobId, so reserve it first:
+      // the row says whose run this is, and an id that's already taken gets a
+      // 409 instead of this run's progress landing in someone else's row.
+      if (clientJobId) {
+        try {
+          await db.insert(schema.jobs).values({
+            id: clientJobId,
+            userId: getAuthUser(request)?.id ?? null,
+            type: "single",
+            status: "processing",
+            inputRefs: [],
+          });
+        } catch (err) {
+          if (isUniqueViolation(err)) {
+            return reply.status(409).send({ error: "Job ID already in use", code: "CONFLICT" });
+          }
+          throw err;
+        }
       }
 
       try {
